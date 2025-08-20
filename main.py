@@ -4,6 +4,7 @@ from time import sleep
 
 TOKEN = "8162382973:AAFUoO9JdktTBE6lzHjhMAjHf2jBgvl8sMw"
 JSON_FILE = "data.json"
+USERS_FILE = "users.json"  # Файл для хранения ID пользователей
 API_URL = f"https://api.telegram.org/bot{TOKEN}/"
 
 
@@ -25,6 +26,28 @@ def save_data(data):
         json.dump(data, f, indent=2)
 
 
+# Загрузка и сохранение пользователей
+def load_users():
+    try:
+        with open(USERS_FILE, "r") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"users": []}
+
+
+def save_users(users_data):
+    with open(USERS_FILE, "w") as f:
+        json.dump(users_data, f, indent=2)
+
+
+def add_user(user_id):
+    """Добавляет нового пользователя в список рассылки"""
+    users_data = load_users()
+    if user_id not in users_data["users"]:
+        users_data["users"].append(user_id)
+        save_users(users_data)
+
+
 def create_reset_item():
     """Создает нулевой пункт для очистки списка"""
     return {
@@ -37,10 +60,22 @@ def create_reset_item():
 
 # Отправка сообщений
 def send_message(chat_id, text):
-    requests.post(
-        API_URL + "sendMessage",
-        json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
-    )
+    try:
+        requests.post(
+            API_URL + "sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=10
+        )
+    except requests.exceptions.RequestException:
+        pass  # Игнорируем ошибки отправки
+
+
+def broadcast_message(text):
+    """Рассылает сообщение всем пользователям"""
+    users_data = load_users()
+    for user_id in users_data["users"]:
+        send_message(user_id, text)
+        sleep(0.1)  # Небольшая задержка чтобы не превысить лимиты API
 
 
 # Генерация руководства
@@ -69,6 +104,8 @@ def get_help_message():
 # Обработка команд
 def process_command(chat_id, command, args, user_id):
     if command == "start":
+        # Добавляем пользователя в список рассылки при старте
+        add_user(user_id)
         return get_help_message()
 
     data = load_data()
@@ -77,16 +114,24 @@ def process_command(chat_id, command, args, user_id):
         if not args:
             return "❌ Используйте: /add <текст>"
 
+        # Добавляем нового пользователя при добавлении пункта
+        add_user(user_id)
+
         # Добавляем новый пункт после нулевого
+        new_item_text = " ".join(args)
         new_item = {
-            "text": " ".join(args),
+            "text": new_item_text,
             "votes": 0,
             "voted_users": [],
             "is_reset": False
         }
         data["items"].append(new_item)
         save_data(data)
-        return f"✅ Добавлено: '{' '.join(args)}'"
+        
+        # Рассылка уведомления всем пользователям
+        broadcast_message(f"📝 Добавлен новый пункт: '{new_item_text}'")
+        
+        return f"✅ Добавлено: '{new_item_text}'"
 
     elif command == "list":
         if len(data["items"]) <= 1:  # Только нулевой пункт
@@ -120,12 +165,16 @@ def process_command(chat_id, command, args, user_id):
         if not item.get("is_reset", False) and item["votes"] >= 2:
             removed_item = data["items"].pop(num)
             save_data(data)
+            # Рассылка уведомления об удалении
+            broadcast_message(f"🗑️ Удалено: '{removed_item['text']}'")
             return f"🗑️ Удалено: '{removed_item['text']}'"
 
         # Обработка нулевого пункта (3 голоса)
         elif item.get("is_reset", False) and item["votes"] >= 3:
             data["items"] = [create_reset_item()]  # Оставляем только нулевой пункт
             save_data(data)
+            # Рассылка уведомления об очистке
+            broadcast_message("♻️ Весь список очищен!")
             return "♻️ Весь список очищен!"
 
         else:
@@ -151,6 +200,9 @@ def main():
             message = update["message"]
             chat_id = message["chat"]["id"]
             user_id = message["from"]["id"]
+
+            # Добавляем пользователя при любом сообщении
+            add_user(user_id)
 
             if "text" not in message:
                 continue
